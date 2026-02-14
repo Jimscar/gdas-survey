@@ -68,7 +68,8 @@ input[type="file"]::file-selector-button{background:var(--accent);color:#fff;bor
 .map-toolbar select,.map-toolbar input[type="text"]{padding:5px 8px;font-size:12px;width:auto;min-width:0;}
 .map-toolbar input[type="text"]{width:55px;}
 .map-toolbar label{margin:0;font-size:11px;display:inline-flex;align-items:center;gap:4px;}
-.pulse-marker{width:20px;height:20px;background:lime;border-radius:50%;animation:pulse 2s infinite;}
+.pulse-marker{width:20px;height:20px;background:lime;border-radius:50%;border:3px solid white;-webkit-animation:pulse 2s infinite;animation:pulse 2s infinite;}
+@-webkit-keyframes pulse{0%{box-shadow:0 0 0 0 rgba(0,255,0,0.7);}70%{box-shadow:0 0 0 15px rgba(0,255,0,0);}100%{box-shadow:0 0 0 0 rgba(0,255,0,0);}}
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(0,255,0,0.7);}70%{box-shadow:0 0 0 15px rgba(0,255,0,0);}100%{box-shadow:0 0 0 0 rgba(0,255,0,0);}}
 .leaflet-popup-content-wrapper{background:var(--surface);color:var(--text);border-radius:8px;}
 .leaflet-popup-tip{background:var(--surface);}.leaflet-popup-content{font-size:12px;line-height:1.6;}
@@ -145,6 +146,9 @@ input[type="file"]::file-selector-button{background:var(--accent);color:#fff;bor
     <button class="btn btn-primary btn-sm" id="mapFiltAll" onclick="setMapFilter('all')">All</button>
     <button class="btn btn-ghost btn-sm" id="mapFiltRx" onclick="setMapFilter('rx')">Rx</button>
     <button class="btn btn-ghost btn-sm" id="mapFiltTx" onclick="setMapFilter('tx')">Tx</button>
+    <span style="border-left:1px solid var(--border);height:20px;margin:0 2px"></span>
+    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('progressFileInput').click()">Import .xlsx</button>
+    <input type="file" id="progressFileInput" accept=".xlsx,.xls" style="display:none" onchange="handleProgressImport(event)">
   </div>
   <div id="mapContainer"></div>
 </div>
@@ -161,6 +165,13 @@ input[type="file"]::file-selector-button{background:var(--accent);color:#fff;bor
 
 <!-- ═══ SETTINGS TAB ═══ -->
 <div class="panel" id="tab-settings">
+  <div class="section">
+    <h3>Operator</h3>
+    <div class="form-grid">
+      <div class="full"><label>Operator ID (initials or crew code)</label><input type="text" id="inOperator" placeholder="e.g. JS, Crew1" maxlength="10" oninput="saveOperator()"></div>
+    </div>
+  </div>
+
   <div class="section">
     <h3>Import Survey Info</h3>
     <p style="font-size:12px;color:var(--text2);margin-bottom:10px">Load your _Survey_Info.xlsx (sensorInfo + sourceInfo sheets)</p>
@@ -194,15 +205,19 @@ var leafletMap=null, sensorMarkers=[], userMarker=null;
 var logType='rx'; // 'rx' or 'tx'
 var logFilter='rx';
 var mapFilter='all'; // 'all', 'rx', 'tx'
+var importedProgress={}; // codes from imported xlsx marked as done
 
 // ═══════ INIT ═══════
 (function init(){
   try{rxData=JSON.parse(localStorage.getItem('rxData'))||[];}catch(e){rxData=[];}
   try{txData=JSON.parse(localStorage.getItem('txData'))||[];}catch(e){txData=[];}
   try{logs=JSON.parse(localStorage.getItem('sensorLogs'))||[];}catch(e){logs=[];}
+  try{importedProgress=JSON.parse(localStorage.getItem('importedProgress'))||{};}catch(e){importedProgress={};}
   var d=localStorage.getItem('selectedDatum'),z=localStorage.getItem('utmZone');
   if(d)document.getElementById('mapDatum').value=d;
   if(z)document.getElementById('mapZone').value=z;
+  var op=localStorage.getItem('operatorId')||'';
+  if(op)document.getElementById('inOperator').value=op;
   var now=new Date();
   document.getElementById('inInstDate').value=now.toISOString().split('T')[0];
   document.getElementById('inInstTime').value=now.toTimeString().slice(0,5);
@@ -393,6 +408,7 @@ function submitLog(){
     pickupDate:v('inPickDate'),pickupTime:v('inPickTime'),
     duration:v('inDuration'),comments:v('inComments'),
     timestamp:new Date().toISOString(),
+    operator:(localStorage.getItem('operatorId')||'').trim(),
     gpsLat:userLat,gpsLon:userLon,gpsAcc:gpsAccuracy
   };
   if(editingIndex!==null){logs[editingIndex]=log;editingIndex=null;document.getElementById('editBtns').style.display='none';toast('Log updated');}
@@ -496,8 +512,8 @@ function initMap(){
 function updateUserMarker(){
   if(!leafletMap||userLat===null)return;
   var icon=L.divIcon({html:'<div class="pulse-marker"></div>',iconSize:[20,20],iconAnchor:[10,10],className:''});
-  if(userMarker)userMarker.setLatLng([userLat,userLon]);
-  else userMarker=L.marker([userLat,userLon],{icon:icon,zIndexOffset:1000}).bindPopup('<strong>You</strong><br>'+userLat.toFixed(6)+', '+userLon.toFixed(6)).addTo(leafletMap);
+  if(userMarker){userMarker.setLatLng([userLat,userLon]);userMarker.setPopupContent('<strong>You</strong><br>'+userLat.toFixed(6)+', '+userLon.toFixed(6));}
+  else{userMarker=L.marker([userLat,userLon],{icon:icon,zIndexOffset:1000}).bindPopup('<strong>You</strong><br>'+userLat.toFixed(6)+', '+userLon.toFixed(6)).addTo(leafletMap);}
 }
 function setMapFilter(f){
   mapFilter=f;
@@ -522,27 +538,34 @@ function plotSensors(){
     var key=sensor.UTMx+','+sensor.UTMy;
     var ll=utmToLatLon(parseFloat(sensor.UTMx),parseFloat(sensor.UTMy),zone);if(!ll)return;
     var code=sensor.sensorCode||sensor.sourceCode||'';
-    var hasLog=logs.some(function(log){return log.sensorCode===code;});
+    var matchingLog=null;
+    for(var li=0;li<logs.length;li++){if(logs[li].sensorCode===code){matchingLog=logs[li];break;}}
+    var hasComplete=matchingLog&&matchingLog.pickupDate&&matchingLog.pickupTime?true:false;
+    var hasStart=matchingLog&&!hasComplete?true:false;
+    // Also check imported progress
+    if(!hasComplete&&importedProgress[code])hasComplete=true;
     if(!grouped[key])grouped[key]={lat:ll.lat,lon:ll.lon,sensors:[]};
-    grouped[key].sensors.push({code:code,area:sensor.area,line:sensor.line,station:sensor.station,type:sensor.sensorType||sensor.sourceType||'',detail:sensor.sensorTypeDetail||sensor.sourceTypeDetail||'',hasLog:hasLog,isTx:!!sensor.sourceCode});
+    grouped[key].sensors.push({code:code,area:sensor.area,line:sensor.line,station:sensor.station,type:sensor.sensorType||sensor.sourceType||'',detail:sensor.sensorTypeDetail||sensor.sourceTypeDetail||'',hasComplete:hasComplete,hasStart:hasStart,isTx:!!sensor.sourceCode});
   });
   var groups=Object.values(grouped),bounds=[];
   groups.forEach(function(group){
-    var hasAnyLog=group.sensors.some(function(s){return s.hasLog;});
-    var hasTx=group.sensors.some(function(s){return s.isTx;});
-    var col=hasAnyLog?'#34c759':hasTx?'#ff9f0a':'#4da6ff';
+    var hasAnyComplete=group.sensors.some(function(s){return s.hasComplete;});
+    var hasAnyStart=group.sensors.some(function(s){return s.hasStart;});
+    var allComplete=group.sensors.every(function(s){return s.hasComplete;});
+    var col=allComplete?'#34c759':hasAnyComplete?'#8ae68a':hasAnyStart?'#ff9f0a':'#4da6ff';
     var sz=14;var labels='';
     if(showLabels){group.sensors.forEach(function(s,i){
       var b64=btoa(JSON.stringify(s));
-      labels+='<div onclick="event.stopPropagation();prefillFromMap(\''+b64+'\')" style="position:absolute;top:'+(-18-i*14)+'px;left:16px;font-size:11px;font-weight:bold;cursor:pointer;white-space:nowrap;color:'+(s.hasLog?'#34c759':'#fff')+';text-shadow:0 0 3px #000;">'+esc(s.code)+'</div>';
+      var lCol=s.hasComplete?'#34c759':s.hasStart?'#ff9f0a':'#222';
+      labels+='<div onclick="event.stopPropagation();prefillFromMap(\''+b64+'\')" style="position:absolute;top:'+(-20-i*16)+'px;left:16px;font-size:13px;font-weight:bold;cursor:pointer;white-space:nowrap;color:'+lCol+';text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff,0 0 4px #fff;">'+esc(s.code)+'</div>';
     });}
     var html='<div style="position:relative;width:'+sz+'px;height:'+sz+'px;background:'+col+';border-radius:50%;border:2px solid white;">'+labels+'</div>';
     var icon=L.divIcon({html:html,iconSize:[sz+80,sz+40],iconAnchor:[sz/2,sz/2],className:''});
     var popup=group.sensors.map(function(s,i){
       var b64=btoa(JSON.stringify(s));
+        var statusHtml=s.hasComplete?'<span style="color:#34c759">Complete</span>':s.hasStart?'<span style="color:#ff9f0a">Started</span>':'<span style="color:#ff453a">Not logged</span>';
       return '<strong>'+esc(s.area)+'/'+esc(s.line)+' Stn '+esc(s.station)+'</strong><br>'
-        +esc(s.type)+': <strong>'+esc(s.code)+'</strong> '
-        +(s.hasLog?'<span style="color:#34c759">Logged</span>':'<span style="color:#ff453a">Not logged</span>')
+        +esc(s.type)+': <strong>'+esc(s.code)+'</strong> '+statusHtml
         +'<br><a href="#" onclick="event.preventDefault();prefillFromMap(\''+b64+'\');" style="color:#4da6ff;text-decoration:underline;">Log this</a>'
         +(i<group.sensors.length-1?'<hr style="border-color:#3a3f4a;margin:4px 0">':'');
     }).join('');
@@ -582,6 +605,40 @@ function prefillFromMap(b64){
       },30);
     },30);
   }catch(e){console.error('prefill err',e);}
+}
+
+function handleProgressImport(evt){
+  var file=evt.target.files[0];if(!file)return;
+  var reader=new FileReader();
+  reader.onload=function(e){
+    try{
+      var wb=XLSX.read(e.target.result,{type:'binary',cellDates:true});
+      var count=0;
+      // Read Receivers sheet - mark codes with both From and To as complete
+      if(wb.SheetNames.indexOf('Receivers')!==-1){
+        var rows=XLSX.utils.sheet_to_json(wb.Sheets['Receivers'],{raw:false});
+        rows.forEach(function(r){
+          var code=r.sensorCode||r.sourceCode||'';
+          var hasTo=r.To&&String(r.To).trim();
+          if(code&&hasTo){importedProgress[code]=true;count++;}
+        });
+      }
+      // Read Transmitters sheet
+      if(wb.SheetNames.indexOf('Transmitters')!==-1){
+        var rows2=XLSX.utils.sheet_to_json(wb.Sheets['Transmitters'],{raw:false});
+        rows2.forEach(function(r){
+          var code=r.sourceCode||r.sensorCode||'';
+          var hasTo=r.To&&String(r.To).trim();
+          if(code&&hasTo){importedProgress[code]=true;count++;}
+        });
+      }
+      localStorage.setItem('importedProgress',JSON.stringify(importedProgress));
+      toast(count+' completed entries imported');
+      plotSensors();
+    }catch(err){toast('Error: '+err.message);}
+  };
+  reader.readAsBinaryString(file);
+  evt.target.value='';
 }
 
 // ═══════ IMPORT ═══════
@@ -650,7 +707,10 @@ function getSurveySuffix(){
 function getExportFilename(){
   var name=getProjectName();
   var suffix=getSurveySuffix();
-  return name+'_'+suffix+'_Installations.xlsx';
+  var op=(localStorage.getItem('operatorId')||'').trim();
+  var fn=name+'_'+suffix+'_Installations';
+  if(op)fn+='_'+op;
+  return fn+'.xlsx';
 }
 
 function fmtDT(d,t){
@@ -824,17 +884,20 @@ function exportCSV(){
   var blob=new Blob([csv],{type:'text/csv'}),a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
   var name=getProjectName(),suffix=getSurveySuffix();
-  a.download=name+'_'+suffix+'_Installations.csv';a.click();
+  var op=(localStorage.getItem('operatorId')||'').trim();
+  var fn=name+'_'+suffix+'_Installations';if(op)fn+='_'+op;
+  a.download=fn+'.csv';a.click();
   toast(complete.length+' logs exported');
 }
 
 // ═══════ DATA MANAGEMENT ═══════
 function clearAllLogs(){if(!confirm('Delete ALL logs?'))return;logs=[];saveLogs();updateLogCount();renderLogs();toast('Cleared');}
-function clearSensorData(){if(!confirm('Clear survey info?'))return;rxData=[];txData=[];localStorage.removeItem('rxData');localStorage.removeItem('txData');populateAreas();updateDataStats();toast('Cleared');}
+function clearSensorData(){if(!confirm('Clear survey info?'))return;rxData=[];txData=[];importedProgress={};localStorage.removeItem('rxData');localStorage.removeItem('txData');localStorage.removeItem('importedProgress');populateAreas();updateDataStats();toast('Cleared');}
 function saveLogs(){localStorage.setItem('sensorLogs',JSON.stringify(logs));}
 function saveDatumZone(){localStorage.setItem('selectedDatum',v('mapDatum'));localStorage.setItem('utmZone',v('mapZone'));refreshCodeDropdown();}
+function saveOperator(){localStorage.setItem('operatorId',v('inOperator').trim());}
 function updateLogCount(){document.getElementById('logCount').textContent=logs.length;}
-function updateDataStats(){document.getElementById('dataStats').textContent=rxData.length+' receivers, '+txData.length+' sources, '+logs.length+' logs';}
+function updateDataStats(){var pCount=Object.keys(importedProgress).length;document.getElementById('dataStats').textContent=rxData.length+' receivers, '+txData.length+' sources, '+logs.length+' logs'+(pCount?', '+pCount+' imported as complete':'');}
 function updateExportPreview(){
   var fn=document.getElementById('exportFilename');
   var warn=document.getElementById('exportWarning');
@@ -855,7 +918,7 @@ function switchTab(name){
   if(name==='form')btns[0].classList.add('active');if(name==='map')btns[1].classList.add('active');
   if(name==='logs')btns[2].classList.add('active');if(name==='settings')btns[3].classList.add('active');
   if(name==='logs')renderLogs();if(name==='settings'){updateDataStats();updateExportPreview();}
-  if(name==='map')setTimeout(function(){initMap();leafletMap.invalidateSize();},100);
+  if(name==='map')setTimeout(function(){initMap();leafletMap.invalidateSize();updateUserMarker();},100);
 }
 
 // ═══════ UTILS ═══════
