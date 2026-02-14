@@ -141,6 +141,10 @@ input[type="file"]::file-selector-button{background:var(--accent);color:#fff;bor
     <button class="btn btn-ghost btn-sm" onclick="clearMap()">Clear</button>
     <button class="btn btn-ghost btn-sm" onclick="resetMapView()">Reset</button>
     <label style="cursor:pointer"><input type="checkbox" id="chkLabels" checked onchange="plotSensors()"> Labels</label>
+    <span style="border-left:1px solid var(--border);height:20px;margin:0 2px"></span>
+    <button class="btn btn-primary btn-sm" id="mapFiltAll" onclick="setMapFilter('all')">All</button>
+    <button class="btn btn-ghost btn-sm" id="mapFiltRx" onclick="setMapFilter('rx')">Rx</button>
+    <button class="btn btn-ghost btn-sm" id="mapFiltTx" onclick="setMapFilter('tx')">Tx</button>
   </div>
   <div id="mapContainer"></div>
 </div>
@@ -185,6 +189,7 @@ var userLat=null, userLon=null, gpsAccuracy=null;
 var leafletMap=null, sensorMarkers=[], userMarker=null;
 var logType='rx'; // 'rx' or 'tx'
 var logFilter='rx';
+var mapFilter='all'; // 'all', 'rx', 'tx'
 
 // ═══════ INIT ═══════
 (function init(){
@@ -488,6 +493,13 @@ function updateUserMarker(){
   if(userMarker)userMarker.setLatLng([userLat,userLon]);
   else userMarker=L.marker([userLat,userLon],{icon:icon,zIndexOffset:1000}).bindPopup('<strong>You</strong><br>'+userLat.toFixed(6)+', '+userLon.toFixed(6)).addTo(leafletMap);
 }
+function setMapFilter(f){
+  mapFilter=f;
+  document.getElementById('mapFiltAll').className='btn btn-sm '+(f==='all'?'btn-primary':'btn-ghost');
+  document.getElementById('mapFiltRx').className='btn btn-sm '+(f==='rx'?'btn-primary':'btn-ghost');
+  document.getElementById('mapFiltTx').className='btn btn-sm '+(f==='tx'?'btn-primary':'btn-ghost');
+  plotSensors();
+}
 function plotSensors(){
   if(!leafletMap)return;
   var zone=v('mapZone'),datum=v('mapDatum');
@@ -495,7 +507,9 @@ function plotSensors(){
   var showLabels=document.getElementById('chkLabels').checked;
   sensorMarkers.forEach(function(m){leafletMap.removeLayer(m);});sensorMarkers=[];
   try{logs=JSON.parse(localStorage.getItem('sensorLogs'))||[];}catch(e){logs=[];}
-  var allData=rxData.concat(txData);
+  var allData=[];
+  if(mapFilter==='all'||mapFilter==='rx')allData=allData.concat(rxData);
+  if(mapFilter==='all'||mapFilter==='tx')allData=allData.concat(txData);
   var grouped={};
   allData.forEach(function(sensor){
     if(!sensor.UTMx||!sensor.UTMy)return;
@@ -504,7 +518,7 @@ function plotSensors(){
     var code=sensor.sensorCode||sensor.sourceCode||'';
     var hasLog=logs.some(function(log){return log.sensorCode===code;});
     if(!grouped[key])grouped[key]={lat:ll.lat,lon:ll.lon,sensors:[]};
-    grouped[key].sensors.push({code:code,area:sensor.area,line:sensor.line,station:sensor.station,type:sensor.sensorType||sensor.sourceType||'',hasLog:hasLog,isTx:!!sensor.sourceCode});
+    grouped[key].sensors.push({code:code,area:sensor.area,line:sensor.line,station:sensor.station,type:sensor.sensorType||sensor.sourceType||'',detail:sensor.sensorTypeDetail||sensor.sourceTypeDetail||'',hasLog:hasLog,isTx:!!sensor.sourceCode});
   });
   var groups=Object.values(grouped),bounds=[];
   groups.forEach(function(group){
@@ -513,24 +527,56 @@ function plotSensors(){
     var col=hasAnyLog?'#34c759':hasTx?'#ff9f0a':'#4da6ff';
     var sz=14;var labels='';
     if(showLabels){group.sensors.forEach(function(s,i){
-      labels+='<div style="position:absolute;top:'+(-18-i*14)+'px;left:16px;font-size:11px;font-weight:bold;cursor:pointer;white-space:nowrap;color:'+(s.hasLog?'#34c759':'#fff')+';text-shadow:0 0 3px #000;">'+esc(s.code)+'</div>';
+      var b64=btoa(JSON.stringify(s));
+      labels+='<div onclick="event.stopPropagation();prefillFromMap(\''+b64+'\')" style="position:absolute;top:'+(-18-i*14)+'px;left:16px;font-size:11px;font-weight:bold;cursor:pointer;white-space:nowrap;color:'+(s.hasLog?'#34c759':'#fff')+';text-shadow:0 0 3px #000;">'+esc(s.code)+'</div>';
     });}
     var html='<div style="position:relative;width:'+sz+'px;height:'+sz+'px;background:'+col+';border-radius:50%;border:2px solid white;">'+labels+'</div>';
     var icon=L.divIcon({html:html,iconSize:[sz+80,sz+40],iconAnchor:[sz/2,sz/2],className:''});
     var popup=group.sensors.map(function(s,i){
+      var b64=btoa(JSON.stringify(s));
       return '<strong>'+esc(s.area)+'/'+esc(s.line)+' Stn '+esc(s.station)+'</strong><br>'
         +esc(s.type)+': <strong>'+esc(s.code)+'</strong> '
         +(s.hasLog?'<span style="color:#34c759">Logged</span>':'<span style="color:#ff453a">Not logged</span>')
+        +'<br><a href="#" onclick="event.preventDefault();prefillFromMap(\''+b64+'\');" style="color:#4da6ff;text-decoration:underline;">Log this</a>'
         +(i<group.sensors.length-1?'<hr style="border-color:#3a3f4a;margin:4px 0">':'');
     }).join('');
     var marker=L.marker([group.lat,group.lon],{icon:icon}).bindPopup(popup).addTo(leafletMap);
     sensorMarkers.push(marker);bounds.push([group.lat,group.lon]);
   });
   if(bounds.length)leafletMap.fitBounds(bounds,{padding:[40,40],maxZoom:15});
-  toast(groups.length+' locations');
+  var label=mapFilter==='all'?'locations':mapFilter==='rx'?'Rx locations':'Tx locations';
+  toast(groups.length+' '+label);
 }
 function clearMap(){sensorMarkers.forEach(function(m){leafletMap.removeLayer(m);});sensorMarkers=[];}
 function resetMapView(){if(!sensorMarkers.length)return;var b=sensorMarkers.map(function(m){return m.getLatLng();});leafletMap.fitBounds(b,{padding:[40,40],maxZoom:15});}
+
+function prefillFromMap(b64){
+  try{
+    var s=JSON.parse(atob(b64));
+    setLogType(s.isTx?'tx':'rx');
+    setTimeout(function(){
+      document.getElementById('selArea').value=s.area||'';onAreaChange();
+      setTimeout(function(){
+        document.getElementById('selLine').value=s.line||'';onLineChange();
+        setTimeout(function(){
+          document.getElementById('selStation').value=String(s.station||'');onStationChange();
+          setTimeout(function(){
+            document.getElementById('selType').value=s.type||'';onTypeChange();
+            setTimeout(function(){
+              document.getElementById('selDetail').value=s.detail||'';onDetailChange();
+              setTimeout(function(){
+                var sel=document.getElementById('selCode');
+                for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===s.code){sel.selectedIndex=i;break;}}
+                validateForm();switchTab('form');
+                window.scrollTo({top:0,behavior:'smooth'});
+              },30);
+            },30);
+          },30);
+        },30);
+      },30);
+    },30);
+  }catch(e){console.error('prefill err',e);}
+}
 
 // ═══════ IMPORT ═══════
 function handleFileImport(evt){
