@@ -179,12 +179,14 @@ input[type="file"]::file-selector-button{background:var(--accent);color:#fff;bor
   </div>
   <div class="section">
     <h3>Installations File</h3>
-    <div id="activeFileDisplay" style="font-size:12px;color:var(--text2);margin-bottom:8px;word-break:break-all;">No file open</div>
+    <div id="activeFileDisplay" style="font-size:12px;color:var(--text2);margin-bottom:4px;word-break:break-all;">No file open</div>
+    <div id="saveModeDisplay" style="font-size:11px;color:var(--text2);margin-bottom:8px;"></div>
     <div id="exportWarning" style="font-size:12px;color:var(--orange);margin-bottom:8px;"></div>
     <div class="btn-row"><button class="btn btn-primary btn-full" onclick="openInstallFile()">Open installations xlsx</button></div>
     <input type="file" id="openInstallInput" accept=".xlsx,.xls" style="display:none" onchange="handleOpenInstall(event)">
     <div class="btn-row"><button class="btn btn-ghost btn-full" onclick="newInstallFile()">New installations xlsx</button></div>
     <div class="btn-row" style="margin-top:12px"><button class="btn btn-green btn-full" id="btnSaveInstall" onclick="saveToInstallFile()" disabled>Save to installations file</button></div>
+    <div class="btn-row"><button class="btn btn-ghost btn-full" id="btnCloseInstall" onclick="closeInstallFile()" style="display:none">Close file</button></div>
   </div>
   <div class="section">
     <h3>Data Management</h3>
@@ -207,6 +209,103 @@ var mapFilter='all'; // 'all', 'rx', 'tx'
 var importedProgress={}; // codes from imported xlsx marked as done
 var activeInstallWb=null; // ExcelJS workbook in memory
 var activeInstallFilename=localStorage.getItem('installFilename')||'';
+var activeFileHandle=null; // File System Access API handle (desktop Chrome)
+
+// ═══════ INDEXEDDB PERSISTENCE ═══════
+function openIDB(){
+  return new Promise(function(resolve,reject){
+    var req=indexedDB.open('gdasSurvey',1);
+    req.onupgradeneeded=function(e){e.target.result.createObjectStore('files');};
+    req.onsuccess=function(e){resolve(e.target.result);};
+    req.onerror=function(){reject(req.error);};
+  });
+}
+function idbSaveWb(buf){
+  return openIDB().then(function(db){
+    return new Promise(function(resolve,reject){
+      var tx=db.transaction('files','readwrite');
+      tx.objectStore('files').put(buf,'installWb');
+      tx.oncomplete=function(){resolve();};
+      tx.onerror=function(){reject(tx.error);};
+    });
+  });
+}
+function idbLoadWb(){
+  return openIDB().then(function(db){
+    return new Promise(function(resolve,reject){
+      var tx=db.transaction('files','readonly');
+      var req=tx.objectStore('files').get('installWb');
+      req.onsuccess=function(){resolve(req.result||null);};
+      req.onerror=function(){reject(req.error);};
+    });
+  });
+}
+function idbClearWb(){
+  return openIDB().then(function(db){
+    return new Promise(function(resolve){
+      var tx=db.transaction('files','readwrite');
+      tx.objectStore('files').delete('installWb');
+      tx.oncomplete=function(){resolve();};
+    });
+  });
+}
+// Persist current workbook to IDB
+async function persistWb(){
+  if(!activeInstallWb)return;
+  try{
+    var buf=await activeInstallWb.xlsx.writeBuffer();
+    await idbSaveWb(buf);
+  }catch(e){console.warn('Failed to persist workbook',e);}
+}
+// Restore workbook from IDB on startup
+async function restoreWb(){
+  if(!activeInstallFilename)return;
+  try{
+    var buf=await idbLoadWb();
+    if(buf){
+      var wb=new ExcelJS.Workbook();
+      await wb.xlsx.load(buf);
+      activeInstallWb=wb;
+      updateInstallDisplay();
+    }
+  }catch(e){console.warn('Failed to restore workbook',e);}
+}
+
+// ═══════ SAVE HELPERS ═══════
+// Use File System Access API if available (desktop Chrome), else share/download
+async function saveBufferToFile(buf,filename){
+  // Try File System Access API (silent save to same file)
+  if(activeFileHandle){
+    try{
+      var writable=await activeFileHandle.createWritable();
+      await writable.write(buf);
+      await writable.close();
+      return 'saved';
+    }catch(e){activeFileHandle=null;} // handle revoked, fall through
+  }
+
+  var blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+
+  // Try Web Share API (iOS — one-tap "Save to Files" remembers location)
+  if(navigator.share&&navigator.canShare){
+    var file=new File([blob],filename,{type:blob.type});
+    if(navigator.canShare({files:[file]})){
+      try{
+        await navigator.share({files:[file],title:filename});
+        return 'shared';
+      }catch(e){
+        if(e.name==='AbortError')return 'cancelled';
+        // fall through to download
+      }
+    }
+  }
+
+  // Fallback: download link
+  var a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download=filename;a.click();
+  setTimeout(function(){URL.revokeObjectURL(a.href);},5000);
+  return 'downloaded';
+}
 
 // ═══════ INIT ═══════
 (function init(){
@@ -231,6 +330,7 @@ var activeInstallFilename=localStorage.getItem('installFilename')||'';
   });
   startGPS();
   if('serviceWorker' in navigator){navigator.serviceWorker.register('service-worker.js').catch(function(){});}
+  restoreWb(); // restore installations workbook from IndexedDB
 })();
 
 // ═══════ LOG TYPE TOGGLE ═══════
@@ -826,19 +926,67 @@ function createFormattedSheet(wb,sheetName,columns){
 function updateInstallDisplay(){
   var el=document.getElementById('activeFileDisplay');
   var btn=document.getElementById('btnSaveInstall');
-  if(activeInstallFilename){
+  var closeBtn=document.getElementById('btnCloseInstall');
+  var modeEl=document.getElementById('saveModeDisplay');
+  if(activeInstallFilename&&activeInstallWb){
     el.innerHTML='<strong>Active file:</strong> '+esc(activeInstallFilename);
     btn.disabled=false;
+    closeBtn.style.display='';
+    // Show save mode
+    if(activeFileHandle){
+      modeEl.innerHTML='<span style="color:var(--green)">✓ Direct save enabled</span>';
+    }else if(navigator.share&&navigator.canShare){
+      modeEl.innerHTML='<span style="color:var(--accent)">Save via Share sheet (tap "Save to Files")</span>';
+    }else{
+      modeEl.innerHTML='<span style="color:var(--text2)">Save via download</span>';
+    }
+  }else if(activeInstallFilename&&!activeInstallWb){
+    el.innerHTML='<strong>Last file:</strong> '+esc(activeInstallFilename)+' <span style="color:var(--orange)">(restoring…)</span>';
+    btn.disabled=true;
+    closeBtn.style.display='none';
+    modeEl.textContent='';
   }else{
     el.textContent='No file open';
     btn.disabled=true;
+    closeBtn.style.display='none';
+    modeEl.textContent='';
   }
   var warn=document.getElementById('exportWarning');
   var incomplete=logs.filter(function(l){return!l.pickupDate||!l.pickupTime;});
   warn.textContent=incomplete.length?incomplete.length+' log(s) missing end time — will not be saved.':'';
 }
 
+async function closeInstallFile(){
+  if(!confirm('Close '+activeInstallFilename+'?\n\nThe workbook data stored in this app will be cleared. Your saved .xlsx file on disk is not affected.'))return;
+  activeInstallWb=null;
+  activeInstallFilename='';
+  activeFileHandle=null;
+  localStorage.removeItem('installFilename');
+  await idbClearWb();
+  updateInstallDisplay();
+  toast('File closed');
+}
+
 function openInstallFile(){
+  // Try File System Access API first (desktop Chrome — gives us a writable handle)
+  if(window.showOpenFilePicker){
+    showOpenFilePicker({types:[{description:'Excel',accept:{'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':['.xlsx']}}],multiple:false}).then(async function(handles){
+      var fh=handles[0];
+      var file=await fh.getFile();
+      var buf=await file.arrayBuffer();
+      var wb=new ExcelJS.Workbook();
+      await wb.xlsx.load(buf);
+      activeInstallWb=wb;
+      activeInstallFilename=file.name;
+      activeFileHandle=fh;
+      localStorage.setItem('installFilename',activeInstallFilename);
+      await persistWb();
+      updateInstallDisplay();
+      toast('Opened: '+file.name);
+    }).catch(function(e){if(e.name!=='AbortError')alert('Error: '+e.message);});
+    return;
+  }
+  // Fallback: standard file input
   document.getElementById('openInstallInput').click();
 }
 
@@ -851,7 +999,9 @@ function handleOpenInstall(evt){
       await wb.xlsx.load(e.target.result);
       activeInstallWb=wb;
       activeInstallFilename=file.name;
+      activeFileHandle=null;
       localStorage.setItem('installFilename',activeInstallFilename);
+      await persistWb();
       updateInstallDisplay();
       toast('Opened: '+file.name);
     }catch(err){alert('Error reading file: '+err.message);}
@@ -860,7 +1010,7 @@ function handleOpenInstall(evt){
   evt.target.value='';
 }
 
-function newInstallFile(){
+async function newInstallFile(){
   var defaultName='Installations.xlsx';
   var name=prompt('Filename for new installations file:',defaultName);
   if(!name)return;
@@ -872,15 +1022,32 @@ function newInstallFile(){
 
   activeInstallWb=wb;
   activeInstallFilename=name;
+  activeFileHandle=null;
   localStorage.setItem('installFilename',name);
 
-  // Download the empty file
-  wb.xlsx.writeBuffer().then(function(buf){
-    var blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
-    var a=document.createElement('a');a.href=URL.createObjectURL(blob);
-    a.download=name;a.click();URL.revokeObjectURL(a.href);
-  });
+  // Try File System Access API for writable handle (desktop Chrome)
+  if(window.showSaveFilePicker){
+    try{
+      var fh=await showSaveFilePicker({suggestedName:name,types:[{description:'Excel',accept:{'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':['.xlsx']}}]});
+      activeFileHandle=fh;
+      activeInstallFilename=fh.name;
+      localStorage.setItem('installFilename',fh.name);
+      var buf=await wb.xlsx.writeBuffer();
+      var writable=await fh.createWritable();
+      await writable.write(buf);
+      await writable.close();
+    }catch(e){
+      if(e.name==='AbortError'){activeInstallWb=null;activeInstallFilename='';localStorage.removeItem('installFilename');updateInstallDisplay();return;}
+      // Fall through to download
+      var buf2=await wb.xlsx.writeBuffer();
+      await saveBufferToFile(buf2,name);
+    }
+  }else{
+    var buf3=await wb.xlsx.writeBuffer();
+    await saveBufferToFile(buf3,name);
+  }
 
+  await persistWb();
   updateInstallDisplay();
   toast('Created: '+name);
 }
@@ -1002,11 +1169,13 @@ async function saveToInstallFile(){
   // Write file
   try{
     var buf=await wb.xlsx.writeBuffer();
-    var blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
-    var a=document.createElement('a');a.href=URL.createObjectURL(blob);
-    a.download=activeInstallFilename;a.click();URL.revokeObjectURL(a.href);
+    var result=await saveBufferToFile(buf,activeInstallFilename);
+    await persistWb();
+
+    if(result==='cancelled'){toast('Save cancelled');return;}
 
     var msg='Saved to '+activeInstallFilename+':\n'+rxAdded+' Rx, '+txAdded+' Tx appended.';
+    if(result==='saved')msg='(Auto-saved) '+msg;
     if(rxSkipped||txSkipped)msg+='\nSkipped (already in file): '+rxSkipped+' Rx, '+txSkipped+' Tx.';
     if(incomplete.length)msg+='\n'+incomplete.length+' log(s) not included (no end time).';
     alert(msg);

@@ -1,4 +1,4 @@
-var CACHE_NAME = 'gdas-survey-v16';
+var CACHE_NAME = 'gdas-survey-v17';
 var FILES_TO_CACHE = [
   './',
   './index.html',
