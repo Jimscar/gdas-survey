@@ -932,14 +932,7 @@ function updateInstallDisplay(){
     el.innerHTML='<strong>Active file:</strong> '+esc(activeInstallFilename);
     btn.disabled=false;
     closeBtn.style.display='';
-    // Show save mode
-    if(activeFileHandle){
-      modeEl.innerHTML='<span style="color:var(--green)">✓ Direct save enabled</span>';
-    }else if(navigator.share&&navigator.canShare){
-      modeEl.innerHTML='<span style="color:var(--accent)">Save via Share sheet (tap "Save to Files")</span>';
-    }else{
-      modeEl.innerHTML='<span style="color:var(--text2)">Save via download</span>';
-    }
+    modeEl.textContent='';
   }else if(activeInstallFilename&&!activeInstallWb){
     el.innerHTML='<strong>Last file:</strong> '+esc(activeInstallFilename)+' <span style="color:var(--orange)">(restoring…)</span>';
     btn.disabled=true;
@@ -1166,21 +1159,17 @@ async function saveToInstallFile(){
     });
   }
 
-  // Write file
+  // Write to IDB and share/download
   try{
     var buf=await wb.xlsx.writeBuffer();
-    var result=await saveBufferToFile(buf,activeInstallFilename);
-    await persistWb();
+    await idbSaveWb(buf);
+    await saveBufferToFile(buf,activeInstallFilename);
 
-    if(result==='cancelled'){toast('Save cancelled');return;}
-
-    var msg='Saved to '+activeInstallFilename+':\n'+rxAdded+' Rx, '+txAdded+' Tx appended.';
-    if(result==='saved')msg='(Auto-saved) '+msg;
-    if(rxSkipped||txSkipped)msg+='\nSkipped (already in file): '+rxSkipped+' Rx, '+txSkipped+' Tx.';
-    if(incomplete.length)msg+='\n'+incomplete.length+' log(s) not included (no end time).';
-    alert(msg);
-    toast((rxAdded+txAdded)+' logs saved');
-  }catch(err){alert('Error writing file: '+err.message);}
+    var msg=rxAdded+' Rx, '+txAdded+' Tx saved.';
+    if(rxSkipped||txSkipped)msg+=' Skipped '+rxSkipped+' Rx, '+txSkipped+' Tx (duplicates).';
+    if(incomplete.length)msg+=' '+incomplete.length+' log(s) not included (no end time).';
+    toast(msg);
+  }catch(err){alert('Error saving: '+err.message);}
 }
 
 // ═══════ DATA MANAGEMENT ═══════
