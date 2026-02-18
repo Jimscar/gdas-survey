@@ -178,13 +178,13 @@ input[type="file"]::file-selector-button{background:var(--accent);color:#fff;bor
     <div id="importStatus" style="margin-top:8px;font-size:12px;color:var(--text2)"></div>
   </div>
   <div class="section">
-    <h3>Export Installations</h3>
-    <div id="exportFilename" style="font-size:12px;color:var(--text2);margin-bottom:8px;word-break:break-all;"></div>
+    <h3>Installations File</h3>
+    <div id="activeFileDisplay" style="font-size:12px;color:var(--text2);margin-bottom:8px;word-break:break-all;">No file open</div>
     <div id="exportWarning" style="font-size:12px;color:var(--orange);margin-bottom:8px;"></div>
-    <div class="btn-row"><button class="btn btn-green btn-full" onclick="exportAppend()">Append to existing .xlsx</button></div>
-    <div class="btn-row"><button class="btn btn-primary btn-full" onclick="exportInstallations()">New .xlsx (overwrite)</button></div>
-    <input type="file" id="appendFileInput" accept=".xlsx,.xls" style="display:none" onchange="handleAppendFile(event)">
-    <div class="btn-row"><button class="btn btn-ghost btn-full" onclick="exportCSV()">Export as .csv</button></div>
+    <div class="btn-row"><button class="btn btn-primary btn-full" onclick="openInstallFile()">Open installations xlsx</button></div>
+    <input type="file" id="openInstallInput" accept=".xlsx,.xls" style="display:none" onchange="handleOpenInstall(event)">
+    <div class="btn-row"><button class="btn btn-ghost btn-full" onclick="newInstallFile()">New installations xlsx</button></div>
+    <div class="btn-row" style="margin-top:12px"><button class="btn btn-green btn-full" id="btnSaveInstall" onclick="saveToInstallFile()" disabled>Save to installations file</button></div>
   </div>
   <div class="section">
     <h3>Data Management</h3>
@@ -205,6 +205,8 @@ var logType='rx'; // 'rx' or 'tx'
 var logFilter='rx';
 var mapFilter='all'; // 'all', 'rx', 'tx'
 var importedProgress={}; // codes from imported xlsx marked as done
+var activeInstallWb=null; // ExcelJS workbook in memory
+var activeInstallFilename=localStorage.getItem('installFilename')||'';
 
 // ═══════ INIT ═══════
 (function init(){
@@ -753,39 +755,8 @@ function handleFileImport(evt){
 }
 
 // ═══════ EXPORT ═══════
-function getProjectName(){
-  // Find most common area string across rx+tx data, ignoring formulas and PMT
-  var counts={};
-  rxData.concat(txData).forEach(function(s){
-    var a=String(s.area||'');
-    if(!a||a.charAt(0)==='='||a==='PMT')return;
-    counts[a]=(counts[a]||0)+1;
-  });
-  var best='',bestN=0;
-  for(var k in counts){if(counts[k]>bestN){bestN=counts[k];best=k;}}
-  return best||'Survey';
-}
-
-function getSurveySuffix(){
-  var hasTx=txData.length>0;
-  var hasCoils=rxData.some(function(s){
-    var d=String(s.sensorTypeDetail||'').toLowerCase();
-    return d.indexOf('induction coil')!==-1;
-  });
-  if(hasTx&&hasCoils)return'IP-MT';
-  if(hasTx)return'IP';
-  if(hasCoils)return'MT';
-  return'MT'; // default
-}
-
-function getExportFilename(){
-  var name=getProjectName();
-  var suffix=getSurveySuffix();
-  var op=(localStorage.getItem('operatorId')||'').trim();
-  var fn=name+'_'+suffix+'_Installations';
-  if(op)fn+='_'+op;
-  return fn+'.xlsx';
-}
+var RX_COLUMNS=['sensorCode','gDAS s/n','Channel','From','To','Duration (Hrs)','Coil s/n','Comments'];
+var TX_COLUMNS=['sourceCode','gDAS s/n','Channel','From','To','Duration (hrs)','Ref current','Comments'];
 
 function fmtDT(d,t){
   if(!d||!t)return'';
@@ -799,226 +770,248 @@ function fmtDateObj(d){
   return dd+'/'+mm+'/'+yy+' '+hh+':'+mi;
 }
 
-function exportInstallations(){
-  if(!logs.length){toast('No logs');return;}
-
-  // Split into complete (has end time) and incomplete
-  var complete=[], incomplete=[];
-  logs.forEach(function(l){
-    if(l.pickupDate&&l.pickupTime) complete.push(l);
-    else incomplete.push(l);
+// Case-insensitive header map: returns {lowercaseHeader → colIndex}
+function getHeadersCI(ws){
+  var hdr={},row=ws.getRow(1);
+  row.eachCell(function(cell,col){if(cell.value)hdr[String(cell.value).toLowerCase()]=col;});
+  return hdr;
+}
+// Resolve header name case-insensitively; add column if missing
+function resolveCol(ws,hdr,name){
+  var key=name.toLowerCase();
+  if(hdr[key])return hdr[key];
+  // Add new column at end
+  var maxCol=0;
+  for(var k in hdr){if(hdr[k]>maxCol)maxCol=hdr[k];}
+  var newCol=maxCol+1;
+  var hdrCell=ws.getRow(1).getCell(newCol);
+  hdrCell.value=name;
+  hdrCell.font={bold:true};
+  hdrCell.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFD9E1F2'}};
+  hdr[key]=newCol;
+  return newCol;
+}
+function copyRowStyle(ws,srcRowNum,tgtRowNum){
+  var src=ws.getRow(srcRowNum),tgt=ws.getRow(tgtRowNum);
+  src.eachCell({includeEmpty:true},function(cell,col){
+    var tc=tgt.getCell(col);
+    if(cell.style)tc.style=JSON.parse(JSON.stringify(cell.style));
   });
-
-  if(!complete.length){
-    var msg='No logs ready to export.\n\n'+incomplete.length+' log(s) still need an end time:\n';
-    incomplete.forEach(function(l){msg+='\n  • '+l.sensorCode+' (from '+l.installDate+' '+l.installTime+')';});
-    alert(msg);
-    return;
-  }
-
-  // Show warning about incomplete logs
-  if(incomplete.length){
-    var msg=complete.length+' log(s) will be exported.\n\n'+incomplete.length+' log(s) NOT included (no end time):\n';
-    incomplete.forEach(function(l){msg+='\n  • '+l.sensorCode+' (from '+l.installDate+' '+l.installTime+')';});
-    msg+='\n\nAdd end times on the Logs tab to include them.';
-    alert(msg);
-  }
-
-  var wb=XLSX.utils.book_new();
-
-  // Receivers sheet
-  var rxLogs=complete.filter(function(l){return(l.logType||'rx')==='rx';});
-  if(rxLogs.length){
-    var rxRows=rxLogs.map(function(l){
-      var row={
-        'sensorCode':l.sensorCode,
-        'gDAS s/n':parseInt(l.gDAS)||l.gDAS,
-        'Channel':parseInt(l.channel)||l.channel,
-        'From':fmtDT(l.installDate,l.installTime),
-        'To':fmtDT(l.pickupDate,l.pickupTime),
-        'Duration (Hrs)':l.duration?parseFloat(l.duration):''
-      };
-      if(l.coilNumber)row['Coil s/n']=l.coilNumber;
-      row['Comments']=l.comments||'';
-      return row;
-    });
-    var ws=XLSX.utils.json_to_sheet(rxRows);
-    XLSX.utils.book_append_sheet(wb,ws,'Receivers');
-  }
-
-  // Transmitters sheet
-  var txLogs=complete.filter(function(l){return l.logType==='tx';});
-  if(txLogs.length){
-    var txRows=txLogs.map(function(l){
-      return{
-        'sourceCode':l.sensorCode,
-        'gDAS s/n':parseInt(l.gDAS)||l.gDAS,
-        'channel':parseInt(l.channel)||l.channel,
-        'From':fmtDT(l.installDate,l.installTime),
-        'To':fmtDT(l.pickupDate,l.pickupTime),
-        'Duration (hrs)':l.duration?parseFloat(l.duration):'',
-        'Ref current':l.refCurrent?parseFloat(l.refCurrent):'',
-        'Comments':l.comments||''
-      };
-    });
-    var ws2=XLSX.utils.json_to_sheet(txRows);
-    XLSX.utils.book_append_sheet(wb,ws2,'Transmitters');
-  }
-
-  if(!wb.SheetNames.length){toast('No complete logs');return;}
-  XLSX.writeFile(wb,getExportFilename());
-  toast(complete.length+' logs exported');
+  tgt.height=src.height;
 }
 
-function exportAppend(){
-  var complete=logs.filter(function(l){return l.pickupDate&&l.pickupTime;});
-  if(!complete.length){
-    var inc=logs.filter(function(l){return!l.pickupDate||!l.pickupTime;});
-    alert('No logs ready to export.'+(inc.length?'\n\n'+inc.length+' log(s) still need an end time.':''));
-    return;
-  }
-  document.getElementById('appendFileInput').click();
+// Create formatted worksheet with given columns
+function createFormattedSheet(wb,sheetName,columns){
+  var ws=wb.addWorksheet(sheetName);
+  var hdrRow=ws.getRow(1);
+  columns.forEach(function(name,i){
+    var cell=hdrRow.getCell(i+1);
+    cell.value=name;
+    cell.font={bold:true,size:11};
+    cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFD9E1F2'}};
+    cell.border={bottom:{style:'thin',color:{argb:'FF8EA9DB'}}};
+    cell.alignment={horizontal:'center',vertical:'center'};
+  });
+  hdrRow.height=20;
+  // Set column widths
+  columns.forEach(function(name,i){
+    var w=Math.max(name.length+2,12);
+    if(name==='From'||name==='To')w=18;
+    if(name==='Comments')w=30;
+    ws.getColumn(i+1).width=w;
+  });
+  return ws;
 }
 
-function handleAppendFile(evt){
+function updateInstallDisplay(){
+  var el=document.getElementById('activeFileDisplay');
+  var btn=document.getElementById('btnSaveInstall');
+  if(activeInstallFilename){
+    el.innerHTML='<strong>Active file:</strong> '+esc(activeInstallFilename);
+    btn.disabled=false;
+  }else{
+    el.textContent='No file open';
+    btn.disabled=true;
+  }
+  var warn=document.getElementById('exportWarning');
+  var incomplete=logs.filter(function(l){return!l.pickupDate||!l.pickupTime;});
+  warn.textContent=incomplete.length?incomplete.length+' log(s) missing end time — will not be saved.':'';
+}
+
+function openInstallFile(){
+  document.getElementById('openInstallInput').click();
+}
+
+function handleOpenInstall(evt){
   var file=evt.target.files[0];if(!file)return;
   var reader=new FileReader();
   reader.onload=async function(e){
     try{
       var wb=new ExcelJS.Workbook();
       await wb.xlsx.load(e.target.result);
-
-      var complete=logs.filter(function(l){return l.pickupDate&&l.pickupTime;});
-      var incomplete=logs.filter(function(l){return!l.pickupDate||!l.pickupTime;});
-      var rxNew=complete.filter(function(l){return(l.logType||'rx')==='rx';});
-      var txNew=complete.filter(function(l){return l.logType==='tx';});
-
-      // Helper: get header map from ExcelJS worksheet (column index → header name)
-      function getHeaders(ws){
-        var hdr={},row=ws.getRow(1);
-        row.eachCell(function(cell,col){hdr[cell.value]=col;});
-        return hdr;
-      }
-      // Helper: copy style from source row to target row
-      function copyRowStyle(ws,srcRowNum,tgtRowNum){
-        var src=ws.getRow(srcRowNum),tgt=ws.getRow(tgtRowNum);
-        src.eachCell({includeEmpty:true},function(cell,col){
-          var tc=tgt.getCell(col);
-          if(cell.style)tc.style=JSON.parse(JSON.stringify(cell.style));
-        });
-        tgt.height=src.height;
-      }
-
-      var rxAdded=0,txAdded=0,rxSkipped=0,txSkipped=0;
-
-      // Process Receivers sheet
-      var wsRx=wb.getWorksheet('Receivers');
-      if(wsRx&&rxNew.length){
-        var hRx=getHeaders(wsRx);
-        // Build dedup keys from existing rows
-        var rxKeys={};
-        var codeCol=hRx['sensorCode']||hRx['sourceCode'];
-        var fromCol=hRx['From'];
-        if(codeCol&&fromCol){
-          wsRx.eachRow(function(row,rowNum){
-            if(rowNum===1)return;
-            var c=row.getCell(codeCol).value||'';
-            var f=row.getCell(fromCol).value||'';
-            if(f instanceof Date)f=fmtDateObj(f);
-            rxKeys[c+'|'+f]=true;
-          });
-        }
-        var styleRow=wsRx.lastRow?wsRx.lastRow.number:1;
-        rxNew.forEach(function(l){
-          var fromStr=fmtDT(l.installDate,l.installTime);
-          var key=l.sensorCode+'|'+fromStr;
-          if(rxKeys[key]){rxSkipped++;return;}
-          var vals={};
-          vals['sensorCode']=l.sensorCode;
-          vals['gDAS s/n']=parseInt(l.gDAS)||l.gDAS;
-          vals['Channel']=parseInt(l.channel)||l.channel;
-          vals['From']=fromStr;
-          vals['To']=fmtDT(l.pickupDate,l.pickupTime);
-          vals['Duration (Hrs)']=l.duration?parseFloat(l.duration):'';
-          if(l.coilNumber)vals['Coil s/n']=l.coilNumber;
-          vals['Comments']=l.comments||'';
-          var newRow=wsRx.addRow([]);
-          copyRowStyle(wsRx,styleRow,newRow.number);
-          for(var h in vals){if(hRx[h])newRow.getCell(hRx[h]).value=vals[h];}
-          rxAdded++;
-        });
-      }
-
-      // Process Transmitters sheet
-      var wsTx=wb.getWorksheet('Transmitters');
-      if(wsTx&&txNew.length){
-        var hTx=getHeaders(wsTx);
-        var txKeys={};
-        var tcodeCol=hTx['sourceCode']||hTx['sensorCode'];
-        var tfromCol=hTx['From'];
-        if(tcodeCol&&tfromCol){
-          wsTx.eachRow(function(row,rowNum){
-            if(rowNum===1)return;
-            var c=row.getCell(tcodeCol).value||'';
-            var f=row.getCell(tfromCol).value||'';
-            if(f instanceof Date)f=fmtDateObj(f);
-            txKeys[c+'|'+f]=true;
-          });
-        }
-        var tStyleRow=wsTx.lastRow?wsTx.lastRow.number:1;
-        txNew.forEach(function(l){
-          var fromStr=fmtDT(l.installDate,l.installTime);
-          var key=l.sensorCode+'|'+fromStr;
-          if(txKeys[key]){txSkipped++;return;}
-          var vals={};
-          vals['sourceCode']=l.sensorCode;
-          vals['gDAS s/n']=parseInt(l.gDAS)||l.gDAS;
-          vals['channel']=parseInt(l.channel)||l.channel;
-          vals['From']=fromStr;
-          vals['To']=fmtDT(l.pickupDate,l.pickupTime);
-          vals['Duration (hrs)']=l.duration?parseFloat(l.duration):'';
-          vals['Ref current']=l.refCurrent?parseFloat(l.refCurrent):'';
-          vals['Comments']=l.comments||'';
-          var newRow=wsTx.addRow([]);
-          copyRowStyle(wsTx,tStyleRow,newRow.number);
-          for(var h in vals){if(hTx[h])newRow.getCell(hTx[h]).value=vals[h];}
-          txAdded++;
-        });
-      }
-
-      // Write preserving formatting
-      var buf=await wb.xlsx.writeBuffer();
-      var blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
-      var a=document.createElement('a');a.href=URL.createObjectURL(blob);
-      a.download=getExportFilename();a.click();URL.revokeObjectURL(a.href);
-
-      var msg='Appended: '+rxAdded+' Rx, '+txAdded+' Tx.';
-      if(rxSkipped||txSkipped)msg+='\nSkipped (already in file): '+rxSkipped+' Rx, '+txSkipped+' Tx.';
-      if(incomplete.length)msg+='\n'+incomplete.length+' log(s) not included (no end time).';
-      alert(msg);
-      toast((rxAdded+txAdded)+' logs appended');
+      activeInstallWb=wb;
+      activeInstallFilename=file.name;
+      localStorage.setItem('installFilename',activeInstallFilename);
+      updateInstallDisplay();
+      toast('Opened: '+file.name);
     }catch(err){alert('Error reading file: '+err.message);}
   };
   reader.readAsArrayBuffer(file);
   evt.target.value='';
 }
 
-function exportCSV(){
-  if(!logs.length){toast('No logs');return;}
+function newInstallFile(){
+  var defaultName='Installations.xlsx';
+  var name=prompt('Filename for new installations file:',defaultName);
+  if(!name)return;
+  if(!name.endsWith('.xlsx'))name+='.xlsx';
+
+  var wb=new ExcelJS.Workbook();
+  createFormattedSheet(wb,'Receivers',RX_COLUMNS);
+  createFormattedSheet(wb,'Transmitters',TX_COLUMNS);
+
+  activeInstallWb=wb;
+  activeInstallFilename=name;
+  localStorage.setItem('installFilename',name);
+
+  // Download the empty file
+  wb.xlsx.writeBuffer().then(function(buf){
+    var blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    var a=document.createElement('a');a.href=URL.createObjectURL(blob);
+    a.download=name;a.click();URL.revokeObjectURL(a.href);
+  });
+
+  updateInstallDisplay();
+  toast('Created: '+name);
+}
+
+async function saveToInstallFile(){
+  if(!activeInstallWb){
+    alert('No installations file open. Use "Open installations xlsx" or "New installations xlsx" first.');
+    return;
+  }
+
   var complete=logs.filter(function(l){return l.pickupDate&&l.pickupTime;});
+  if(!complete.length){
+    var inc=logs.filter(function(l){return!l.pickupDate||!l.pickupTime;});
+    alert('No logs ready to save.'+(inc.length?'\n\n'+inc.length+' log(s) still need an end time.':''));
+    return;
+  }
+
   var incomplete=logs.filter(function(l){return!l.pickupDate||!l.pickupTime;});
-  if(!complete.length){alert('No logs ready — '+incomplete.length+' log(s) still need an end time.');return;}
-  if(incomplete.length)alert(complete.length+' exported, '+incomplete.length+' skipped (no end time).');
-  var h=['logType','sensorCode','gDAS_SN','Channel','From','To','Duration_hrs','CoilSN','RefCurrent','Comments','GPS_Lat','GPS_Lon'];
-  var rows=complete.map(function(l){return[l.logType||'rx',l.sensorCode,l.gDAS,l.channel,fmtDT(l.installDate,l.installTime),fmtDT(l.pickupDate,l.pickupTime),l.duration||'',l.coilNumber||'',l.refCurrent||'','"'+(l.comments||'').replace(/"/g,'""')+'"',l.gpsLat||'',l.gpsLon||''];});
-  var csv=[h.join(',')].concat(rows.map(function(r){return r.join(',')})).join('\n');
-  var blob=new Blob([csv],{type:'text/csv'}),a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  var name=getProjectName(),suffix=getSurveySuffix();
-  var op=(localStorage.getItem('operatorId')||'').trim();
-  var fn=name+'_'+suffix+'_Installations';if(op)fn+='_'+op;
-  a.download=fn+'.csv';a.click();
-  toast(complete.length+' logs exported');
+  var rxNew=complete.filter(function(l){return(l.logType||'rx')==='rx';});
+  var txNew=complete.filter(function(l){return l.logType==='tx';});
+  var wb=activeInstallWb;
+
+  var rxAdded=0,txAdded=0,rxSkipped=0,txSkipped=0;
+
+  // ── Receivers sheet ──
+  var wsRx=wb.getWorksheet('Receivers');
+  if(!wsRx)wsRx=createFormattedSheet(wb,'Receivers',RX_COLUMNS);
+
+  if(rxNew.length){
+    var hRx=getHeadersCI(wsRx);
+    // Ensure all columns exist
+    RX_COLUMNS.forEach(function(c){resolveCol(wsRx,hRx,c);});
+
+    // Build dedup keys
+    var rxKeys={};
+    var codeCol=hRx['sensorcode']||hRx['sourcecode'];
+    var fromCol=hRx['from'];
+    if(codeCol&&fromCol){
+      wsRx.eachRow(function(row,rowNum){
+        if(rowNum===1)return;
+        var c=row.getCell(codeCol).value||'';
+        var f=row.getCell(fromCol).value||'';
+        if(f instanceof Date)f=fmtDateObj(f);
+        rxKeys[c+'|'+f]=true;
+      });
+    }
+
+    var styleRow=wsRx.rowCount>1?wsRx.rowCount:1;
+    rxNew.forEach(function(l){
+      var fromStr=fmtDT(l.installDate,l.installTime);
+      var key=l.sensorCode+'|'+fromStr;
+      if(rxKeys[key]){rxSkipped++;return;}
+      var vals={
+        'sensorCode':l.sensorCode,
+        'gDAS s/n':parseInt(l.gDAS)||l.gDAS,
+        'Channel':parseInt(l.channel)||l.channel,
+        'From':fromStr,
+        'To':fmtDT(l.pickupDate,l.pickupTime),
+        'Duration (Hrs)':l.duration?parseFloat(l.duration):'',
+        'Coil s/n':l.coilNumber||'',
+        'Comments':l.comments||''
+      };
+      var newRow=wsRx.addRow([]);
+      if(styleRow>1)copyRowStyle(wsRx,styleRow,newRow.number);
+      for(var h in vals){
+        var col=hRx[h.toLowerCase()];
+        if(col)newRow.getCell(col).value=vals[h];
+      }
+      rxAdded++;
+    });
+  }
+
+  // ── Transmitters sheet ──
+  var wsTx=wb.getWorksheet('Transmitters');
+  if(!wsTx)wsTx=createFormattedSheet(wb,'Transmitters',TX_COLUMNS);
+
+  if(txNew.length){
+    var hTx=getHeadersCI(wsTx);
+    TX_COLUMNS.forEach(function(c){resolveCol(wsTx,hTx,c);});
+
+    var txKeys={};
+    var tcodeCol=hTx['sourcecode']||hTx['sensorcode'];
+    var tfromCol=hTx['from'];
+    if(tcodeCol&&tfromCol){
+      wsTx.eachRow(function(row,rowNum){
+        if(rowNum===1)return;
+        var c=row.getCell(tcodeCol).value||'';
+        var f=row.getCell(tfromCol).value||'';
+        if(f instanceof Date)f=fmtDateObj(f);
+        txKeys[c+'|'+f]=true;
+      });
+    }
+
+    var tStyleRow=wsTx.rowCount>1?wsTx.rowCount:1;
+    txNew.forEach(function(l){
+      var fromStr=fmtDT(l.installDate,l.installTime);
+      var key=l.sensorCode+'|'+fromStr;
+      if(txKeys[key]){txSkipped++;return;}
+      var vals={
+        'sourceCode':l.sensorCode,
+        'gDAS s/n':parseInt(l.gDAS)||l.gDAS,
+        'Channel':parseInt(l.channel)||l.channel,
+        'From':fromStr,
+        'To':fmtDT(l.pickupDate,l.pickupTime),
+        'Duration (hrs)':l.duration?parseFloat(l.duration):'',
+        'Ref current':l.refCurrent?parseFloat(l.refCurrent):'',
+        'Comments':l.comments||''
+      };
+      var newRow=wsTx.addRow([]);
+      if(tStyleRow>1)copyRowStyle(wsTx,tStyleRow,newRow.number);
+      for(var h in vals){
+        var col=hTx[h.toLowerCase()];
+        if(col)newRow.getCell(col).value=vals[h];
+      }
+      txAdded++;
+    });
+  }
+
+  // Write file
+  try{
+    var buf=await wb.xlsx.writeBuffer();
+    var blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    var a=document.createElement('a');a.href=URL.createObjectURL(blob);
+    a.download=activeInstallFilename;a.click();URL.revokeObjectURL(a.href);
+
+    var msg='Saved to '+activeInstallFilename+':\n'+rxAdded+' Rx, '+txAdded+' Tx appended.';
+    if(rxSkipped||txSkipped)msg+='\nSkipped (already in file): '+rxSkipped+' Rx, '+txSkipped+' Tx.';
+    if(incomplete.length)msg+='\n'+incomplete.length+' log(s) not included (no end time).';
+    alert(msg);
+    toast((rxAdded+txAdded)+' logs saved');
+  }catch(err){alert('Error writing file: '+err.message);}
 }
 
 // ═══════ DATA MANAGEMENT ═══════
@@ -1029,16 +1022,7 @@ function saveDatumZone(){localStorage.setItem('selectedDatum',v('mapDatum'));loc
 function saveOperator(){localStorage.setItem('operatorId',v('inOperator').trim());}
 function updateLogCount(){document.getElementById('logCount').textContent=logs.length;}
 function updateDataStats(){var pCount=Object.keys(importedProgress).length;document.getElementById('dataStats').textContent=rxData.length+' receivers, '+txData.length+' sources, '+logs.length+' logs'+(pCount?', '+pCount+' imported as complete':'');}
-function updateExportPreview(){
-  var fn=document.getElementById('exportFilename');
-  var warn=document.getElementById('exportWarning');
-  if(!fn)return;
-  fn.textContent='Filename: '+getExportFilename();
-  var incomplete=logs.filter(function(l){return!l.pickupDate||!l.pickupTime;});
-  if(incomplete.length){
-    warn.textContent=incomplete.length+' log(s) missing end time — will not be included in export.';
-  }else{warn.textContent='';}
-}
+function updateExportPreview(){updateInstallDisplay();}
 
 // ═══════ TABS ═══════
 function switchTab(name){
