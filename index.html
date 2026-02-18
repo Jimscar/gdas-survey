@@ -14,6 +14,7 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 <style>
 :root {
   --bg:#1a1d23; --surface:#23272f; --surface2:#2a2f38; --border:#3a3f4a;
@@ -142,6 +143,7 @@ input[type="file"]::file-selector-button{background:var(--accent);color:#fff;bor
     <button class="btn btn-ghost btn-sm" onclick="clearMap()">Clear</button>
     <button class="btn btn-ghost btn-sm" onclick="resetMapView()">Reset</button>
     <label style="cursor:pointer"><input type="checkbox" id="chkLabels" checked onchange="plotSensors()"> Labels</label>
+    <label style="cursor:pointer"><input type="checkbox" id="chkLines" onchange="plotSensors()"> Lines</label>
     <span style="border-left:1px solid var(--border);height:20px;margin:0 2px"></span>
     <button class="btn btn-primary btn-sm" id="mapFiltAll" onclick="setMapFilter('all')">All</button>
     <button class="btn btn-ghost btn-sm" id="mapFiltRx" onclick="setMapFilter('rx')">Rx</button>
@@ -201,7 +203,7 @@ input[type="file"]::file-selector-button{background:var(--accent);color:#fff;bor
 // ═══════ STATE ═══════
 var rxData=[], txData=[], logs=[], editingIndex=null;
 var userLat=null, userLon=null, gpsAccuracy=null;
-var leafletMap=null, sensorMarkers=[], userMarker=null;
+var leafletMap=null, sensorMarkers=[], sensorLines=[], userMarker=null;
 var logType='rx'; // 'rx' or 'tx'
 var logFilter='rx';
 var mapFilter='all'; // 'all', 'rx', 'tx'
@@ -551,6 +553,7 @@ function plotSensors(){
   if(!zone||!datum){toast('Set datum & zone');return;}
   var showLabels=document.getElementById('chkLabels').checked;
   sensorMarkers.forEach(function(m){leafletMap.removeLayer(m);});sensorMarkers=[];
+  sensorLines.forEach(function(l){leafletMap.removeLayer(l);});sensorLines=[];
   try{logs=JSON.parse(localStorage.getItem('sensorLogs'))||[];}catch(e){logs=[];}
   var allData=[];
   if(mapFilter==='all'||mapFilter==='rx')allData=allData.concat(rxData);
@@ -596,10 +599,39 @@ function plotSensors(){
     sensorMarkers.push(marker);bounds.push([group.lat,group.lon]);
   });
   if(bounds.length)leafletMap.fitBounds(bounds,{padding:[40,40],maxZoom:15});
+
+  // Draw dipole lines if checkbox checked
+  if(document.getElementById('chkLines').checked){
+    var lineData=[];
+    if(mapFilter==='all'||mapFilter==='rx'){
+      rxData.forEach(function(s){
+        var st=s.sensorType||'';
+        if(st.indexOf('Ex')!==0&&st.indexOf('Ey')!==0)return;
+        if(!s.utmr1x||!s.utmr1y||!s.utmr2x||!s.utmr2y)return;
+        var p1=utmToLatLon(parseFloat(s.utmr1x),parseFloat(s.utmr1y),zone);
+        var p2=utmToLatLon(parseFloat(s.utmr2x),parseFloat(s.utmr2y),zone);
+        if(p1&&p2)lineData.push({pts:[[p1.lat,p1.lon],[p2.lat,p2.lon]],color:'#4da6ff',code:s.sensorCode||''});
+      });
+    }
+    if(mapFilter==='all'||mapFilter==='tx'){
+      txData.forEach(function(s){
+        if(!s.utmr1x||!s.utmr1y||!s.utmr2x||!s.utmr2y)return;
+        var p1=utmToLatLon(parseFloat(s.utmr1x),parseFloat(s.utmr1y),zone);
+        var p2=utmToLatLon(parseFloat(s.utmr2x),parseFloat(s.utmr2y),zone);
+        if(p1&&p2)lineData.push({pts:[[p1.lat,p1.lon],[p2.lat,p2.lon]],color:'#ff9f0a',code:s.sourceCode||''});
+      });
+    }
+    lineData.forEach(function(d){
+      var pl=L.polyline(d.pts,{color:d.color,weight:2,opacity:0.8}).addTo(leafletMap);
+      if(d.code)pl.bindTooltip(d.code,{permanent:false,direction:'center'});
+      sensorLines.push(pl);
+    });
+  }
+
   var label=mapFilter==='all'?'locations':mapFilter==='rx'?'Rx locations':'Tx locations';
   toast(groups.length+' '+label);
 }
-function clearMap(){sensorMarkers.forEach(function(m){leafletMap.removeLayer(m);});sensorMarkers=[];}
+function clearMap(){sensorMarkers.forEach(function(m){leafletMap.removeLayer(m);});sensorMarkers=[];sensorLines.forEach(function(l){leafletMap.removeLayer(l);});sensorLines=[];}
 function resetMapView(){if(!sensorMarkers.length)return;var b=sensorMarkers.map(function(m){return m.getLatLng();});leafletMap.fitBounds(b,{padding:[40,40],maxZoom:15});}
 
 function prefillFromMap(b64){
@@ -741,6 +773,12 @@ function fmtDT(d,t){
   var parts=d.split('-');
   return parts[2]+'/'+parts[1]+'/'+parts[0]+' '+t;
 }
+function fmtDateObj(d){
+  if(!(d instanceof Date))return String(d);
+  var dd=String(d.getDate()).padStart(2,'0'),mm=String(d.getMonth()+1).padStart(2,'0'),yy=d.getFullYear();
+  var hh=String(d.getHours()).padStart(2,'0'),mi=String(d.getMinutes()).padStart(2,'0');
+  return dd+'/'+mm+'/'+yy+' '+hh+':'+mi;
+}
 
 function exportInstallations(){
   if(!logs.length){toast('No logs');return;}
@@ -826,65 +864,114 @@ function exportAppend(){
 function handleAppendFile(evt){
   var file=evt.target.files[0];if(!file)return;
   var reader=new FileReader();
-  reader.onload=function(e){
+  reader.onload=async function(e){
     try{
-      var wb=XLSX.read(e.target.result,{type:'binary',cellDates:true});
+      var wb=new ExcelJS.Workbook();
+      await wb.xlsx.load(e.target.result);
 
       var complete=logs.filter(function(l){return l.pickupDate&&l.pickupTime;});
       var incomplete=logs.filter(function(l){return!l.pickupDate||!l.pickupTime;});
       var rxNew=complete.filter(function(l){return(l.logType||'rx')==='rx';});
       var txNew=complete.filter(function(l){return l.logType==='tx';});
 
-      // Read existing Receivers sheet
-      var existingRx=[];
-      if(wb.SheetNames.indexOf('Receivers')!==-1){
-        existingRx=XLSX.utils.sheet_to_json(wb.Sheets['Receivers'],{raw:false});
+      // Helper: get header map from ExcelJS worksheet (column index → header name)
+      function getHeaders(ws){
+        var hdr={},row=ws.getRow(1);
+        row.eachCell(function(cell,col){hdr[cell.value]=col;});
+        return hdr;
       }
-      // Read existing Transmitters sheet
-      var existingTx=[];
-      if(wb.SheetNames.indexOf('Transmitters')!==-1){
-        existingTx=XLSX.utils.sheet_to_json(wb.Sheets['Transmitters'],{raw:false});
+      // Helper: copy style from source row to target row
+      function copyRowStyle(ws,srcRowNum,tgtRowNum){
+        var src=ws.getRow(srcRowNum),tgt=ws.getRow(tgtRowNum);
+        src.eachCell({includeEmpty:true},function(cell,col){
+          var tc=tgt.getCell(col);
+          if(cell.style)tc.style=JSON.parse(JSON.stringify(cell.style));
+        });
+        tgt.height=src.height;
       }
 
-      // Build dedup keys from existing data (sensorCode + From)
-      var rxKeys={};
-      existingRx.forEach(function(r){rxKeys[(r.sensorCode||r.sourceCode||'')+'|'+(r.From||'')]=true;});
-      var txKeys={};
-      existingTx.forEach(function(r){txKeys[(r.sourceCode||r.sensorCode||'')+'|'+(r.From||'')]=true;});
-
-      // Append new rows, skipping duplicates
       var rxAdded=0,txAdded=0,rxSkipped=0,txSkipped=0;
 
-      rxNew.forEach(function(l){
-        var fromStr=fmtDT(l.installDate,l.installTime);
-        var key=l.sensorCode+'|'+fromStr;
-        if(rxKeys[key]){rxSkipped++;return;}
-        var row={'sensorCode':l.sensorCode,'gDAS s/n':parseInt(l.gDAS)||l.gDAS,'Channel':parseInt(l.channel)||l.channel,'From':fromStr,'To':fmtDT(l.pickupDate,l.pickupTime),'Duration (Hrs)':l.duration?parseFloat(l.duration):''};
-        if(l.coilNumber)row['Coil s/n']=l.coilNumber;
-        row['Comments']=l.comments||'';
-        existingRx.push(row);rxAdded++;
-      });
-
-      txNew.forEach(function(l){
-        var fromStr=fmtDT(l.installDate,l.installTime);
-        var key=l.sensorCode+'|'+fromStr;
-        if(txKeys[key]){txSkipped++;return;}
-        existingTx.push({'sourceCode':l.sensorCode,'gDAS s/n':parseInt(l.gDAS)||l.gDAS,'channel':parseInt(l.channel)||l.channel,'From':fromStr,'To':fmtDT(l.pickupDate,l.pickupTime),'Duration (hrs)':l.duration?parseFloat(l.duration):'','Ref current':l.refCurrent?parseFloat(l.refCurrent):'','Comments':l.comments||''});
-        txAdded++;
-      });
-
-      // Rebuild workbook
-      var wbOut=XLSX.utils.book_new();
-      if(existingRx.length){
-        var wsRx=XLSX.utils.json_to_sheet(existingRx);
-        XLSX.utils.book_append_sheet(wbOut,wsRx,'Receivers');
+      // Process Receivers sheet
+      var wsRx=wb.getWorksheet('Receivers');
+      if(wsRx&&rxNew.length){
+        var hRx=getHeaders(wsRx);
+        // Build dedup keys from existing rows
+        var rxKeys={};
+        var codeCol=hRx['sensorCode']||hRx['sourceCode'];
+        var fromCol=hRx['From'];
+        if(codeCol&&fromCol){
+          wsRx.eachRow(function(row,rowNum){
+            if(rowNum===1)return;
+            var c=row.getCell(codeCol).value||'';
+            var f=row.getCell(fromCol).value||'';
+            if(f instanceof Date)f=fmtDateObj(f);
+            rxKeys[c+'|'+f]=true;
+          });
+        }
+        var styleRow=wsRx.lastRow?wsRx.lastRow.number:1;
+        rxNew.forEach(function(l){
+          var fromStr=fmtDT(l.installDate,l.installTime);
+          var key=l.sensorCode+'|'+fromStr;
+          if(rxKeys[key]){rxSkipped++;return;}
+          var vals={};
+          vals['sensorCode']=l.sensorCode;
+          vals['gDAS s/n']=parseInt(l.gDAS)||l.gDAS;
+          vals['Channel']=parseInt(l.channel)||l.channel;
+          vals['From']=fromStr;
+          vals['To']=fmtDT(l.pickupDate,l.pickupTime);
+          vals['Duration (Hrs)']=l.duration?parseFloat(l.duration):'';
+          if(l.coilNumber)vals['Coil s/n']=l.coilNumber;
+          vals['Comments']=l.comments||'';
+          var newRow=wsRx.addRow([]);
+          copyRowStyle(wsRx,styleRow,newRow.number);
+          for(var h in vals){if(hRx[h])newRow.getCell(hRx[h]).value=vals[h];}
+          rxAdded++;
+        });
       }
-      if(existingTx.length){
-        var wsTx=XLSX.utils.json_to_sheet(existingTx);
-        XLSX.utils.book_append_sheet(wbOut,wsTx,'Transmitters');
+
+      // Process Transmitters sheet
+      var wsTx=wb.getWorksheet('Transmitters');
+      if(wsTx&&txNew.length){
+        var hTx=getHeaders(wsTx);
+        var txKeys={};
+        var tcodeCol=hTx['sourceCode']||hTx['sensorCode'];
+        var tfromCol=hTx['From'];
+        if(tcodeCol&&tfromCol){
+          wsTx.eachRow(function(row,rowNum){
+            if(rowNum===1)return;
+            var c=row.getCell(tcodeCol).value||'';
+            var f=row.getCell(tfromCol).value||'';
+            if(f instanceof Date)f=fmtDateObj(f);
+            txKeys[c+'|'+f]=true;
+          });
+        }
+        var tStyleRow=wsTx.lastRow?wsTx.lastRow.number:1;
+        txNew.forEach(function(l){
+          var fromStr=fmtDT(l.installDate,l.installTime);
+          var key=l.sensorCode+'|'+fromStr;
+          if(txKeys[key]){txSkipped++;return;}
+          var vals={};
+          vals['sourceCode']=l.sensorCode;
+          vals['gDAS s/n']=parseInt(l.gDAS)||l.gDAS;
+          vals['channel']=parseInt(l.channel)||l.channel;
+          vals['From']=fromStr;
+          vals['To']=fmtDT(l.pickupDate,l.pickupTime);
+          vals['Duration (hrs)']=l.duration?parseFloat(l.duration):'';
+          vals['Ref current']=l.refCurrent?parseFloat(l.refCurrent):'';
+          vals['Comments']=l.comments||'';
+          var newRow=wsTx.addRow([]);
+          copyRowStyle(wsTx,tStyleRow,newRow.number);
+          for(var h in vals){if(hTx[h])newRow.getCell(hTx[h]).value=vals[h];}
+          txAdded++;
+        });
       }
 
-      XLSX.writeFile(wbOut,getExportFilename());
+      // Write preserving formatting
+      var buf=await wb.xlsx.writeBuffer();
+      var blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+      var a=document.createElement('a');a.href=URL.createObjectURL(blob);
+      a.download=getExportFilename();a.click();URL.revokeObjectURL(a.href);
 
       var msg='Appended: '+rxAdded+' Rx, '+txAdded+' Tx.';
       if(rxSkipped||txSkipped)msg+='\nSkipped (already in file): '+rxSkipped+' Rx, '+txSkipped+' Tx.';
@@ -893,8 +980,7 @@ function handleAppendFile(evt){
       toast((rxAdded+txAdded)+' logs appended');
     }catch(err){alert('Error reading file: '+err.message);}
   };
-  reader.readAsBinaryString(file);
-  // Reset input so same file can be picked again
+  reader.readAsArrayBuffer(file);
   evt.target.value='';
 }
 
