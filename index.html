@@ -274,33 +274,18 @@ async function restoreWb(){
 // ═══════ SAVE HELPERS ═══════
 // Use File System Access API if available (desktop Chrome), else share/download
 async function saveBufferToFile(buf,filename){
-  // Try File System Access API (silent save to same file)
+  // Try File System Access API (silent save to same file - desktop Chrome)
   if(activeFileHandle){
     try{
       var writable=await activeFileHandle.createWritable();
       await writable.write(buf);
       await writable.close();
       return 'saved';
-    }catch(e){activeFileHandle=null;} // handle revoked, fall through
+    }catch(e){activeFileHandle=null;}
   }
 
+  // Download link - on iOS tap the download then "Save to Files" to navigate and overwrite
   var blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
-
-  // Try Web Share API (iOS — one-tap "Save to Files" remembers location)
-  if(navigator.share&&navigator.canShare){
-    var file=new File([blob],filename,{type:blob.type});
-    if(navigator.canShare({files:[file]})){
-      try{
-        await navigator.share({files:[file],title:filename});
-        return 'shared';
-      }catch(e){
-        if(e.name==='AbortError')return 'cancelled';
-        // fall through to download
-      }
-    }
-  }
-
-  // Fallback: download link
   var a=document.createElement('a');a.href=URL.createObjectURL(blob);
   a.download=filename;a.click();
   setTimeout(function(){URL.revokeObjectURL(a.href);},5000);
