@@ -1,4 +1,4 @@
-var CACHE_NAME = 'gdas-survey-v12';
+var CACHE_NAME = 'gdas-survey-v15';
 var FILES_TO_CACHE = [
   './',
   './index.html',
@@ -7,7 +7,8 @@ var FILES_TO_CACHE = [
   './icons/icon-512.png',
   'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
   'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
-  'https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js'
+  'https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js',
+  'https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js'
 ];
 
 // Install - cache all core files

@@ -148,9 +148,6 @@ input[type="file"]::file-selector-button{background:var(--accent);color:#fff;bor
     <button class="btn btn-primary btn-sm" id="mapFiltAll" onclick="setMapFilter('all')">All</button>
     <button class="btn btn-ghost btn-sm" id="mapFiltRx" onclick="setMapFilter('rx')">Rx</button>
     <button class="btn btn-ghost btn-sm" id="mapFiltTx" onclick="setMapFilter('tx')">Tx</button>
-    <span style="border-left:1px solid var(--border);height:20px;margin:0 2px"></span>
-    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('progressFileInput').click()">Import .xlsx</button>
-    <input type="file" id="progressFileInput" accept=".xlsx,.xls" style="display:none" onchange="handleProgressImport(event)">
   </div>
   <div id="mapContainer"></div>
 </div>
@@ -602,22 +599,78 @@ function plotSensors(){
 
   // Draw dipole lines if checkbox checked
   if(document.getElementById('chkLines').checked){
+    // Robust column name resolver for dipole endpoints
+    // Handles: UTMr1x, utmr1x, UTMt1x, utmt1x, r1xutm, R1xUTM, etc.
+    function findDipoleFields(sample){
+      var keys=Object.keys(sample);
+      var map={r1x:null,r1y:null,r2x:null,r2y:null,t1x:null,t1y:null,t2x:null,t2y:null};
+      var patterns={
+        r1x:/^utm[_]?r[_]?1[_]?x$|^r[_]?1[_]?x[_]?utm$/i,
+        r1y:/^utm[_]?r[_]?1[_]?y$|^r[_]?1[_]?y[_]?utm$/i,
+        r2x:/^utm[_]?r[_]?2[_]?x$|^r[_]?2[_]?x[_]?utm$/i,
+        r2y:/^utm[_]?r[_]?2[_]?y$|^r[_]?2[_]?y[_]?utm$/i,
+        t1x:/^utm[_]?t[_]?1[_]?x$|^t[_]?1[_]?x[_]?utm$/i,
+        t1y:/^utm[_]?t[_]?1[_]?y$|^t[_]?1[_]?y[_]?utm$/i,
+        t2x:/^utm[_]?t[_]?2[_]?x$|^t[_]?2[_]?x[_]?utm$/i,
+        t2y:/^utm[_]?t[_]?2[_]?y$|^t[_]?2[_]?y[_]?utm$/i
+      };
+      keys.forEach(function(k){
+        for(var p in patterns){if(patterns[p].test(k)){map[p]=k;break;}}
+      });
+      return map;
+    }
+    function getDipoleCoords(s,fields,isTx){
+      // For Tx, prefer t-fields, fall back to r-fields (handles sourceInfo with UTMr columns)
+      var x1k,y1k,x2k,y2k;
+      if(isTx){
+        x1k=fields.t1x||fields.r1x; y1k=fields.t1y||fields.r1y;
+        x2k=fields.t2x||fields.r2x; y2k=fields.t2y||fields.r2y;
+      }else{
+        x1k=fields.r1x||fields.t1x; y1k=fields.r1y||fields.t1y;
+        x2k=fields.r2x||fields.t2x; y2k=fields.r2y||fields.t2y;
+      }
+      if(!x1k||!y1k||!x2k||!y2k)return null;
+      // Resolve value: use cached number, or try to evaluate simple formula against UTMx/UTMy
+      function resolveVal(raw,sensor,isYaxis){
+        if(typeof raw==='number')return raw;
+        var n=parseFloat(raw);
+        if(!isNaN(n))return n;
+        // If formula string like "=G12-100", try simple offset from UTMx/UTMy
+        if(typeof raw==='string'&&raw.charAt(0)==='='){
+          var base=isYaxis?parseFloat(sensor.UTMy||sensor.utmy||0):parseFloat(sensor.UTMx||sensor.utmx||0);
+          // Match: =COL+num or =COL-num
+          var m=raw.match(/^=\s*[A-Z]+\d+\s*([+\-])\s*([\d.]+)\s*$/i);
+          if(m){var offset=parseFloat(m[2]);if(m[1]==='-')offset=-offset;return base+offset;}
+          // Direct cell ref with no offset (=COL)
+          if(/^=\s*[A-Z]+\d+\s*$/i.test(raw))return base;
+        }
+        return NaN;
+      }
+      var x1=resolveVal(s[x1k],s,false),y1=resolveVal(s[y1k],s,true),x2=resolveVal(s[x2k],s,false),y2=resolveVal(s[y2k],s,true);
+      if(isNaN(x1)||isNaN(y1)||isNaN(x2)||isNaN(y2))return null;
+      if(x1===0&&y1===0&&x2===0&&y2===0)return null;
+      return{x1:x1,y1:y1,x2:x2,y2:y2};
+    }
+
     var lineData=[];
+    var rxFields=rxData.length?findDipoleFields(rxData[0]):{};
+    var txFields=txData.length?findDipoleFields(txData[0]):{};
+
     if(mapFilter==='all'||mapFilter==='rx'){
       rxData.forEach(function(s){
         var st=s.sensorType||'';
         if(st.indexOf('Ex')!==0&&st.indexOf('Ey')!==0)return;
-        if(!s.utmr1x||!s.utmr1y||!s.utmr2x||!s.utmr2y)return;
-        var p1=utmToLatLon(parseFloat(s.utmr1x),parseFloat(s.utmr1y),zone);
-        var p2=utmToLatLon(parseFloat(s.utmr2x),parseFloat(s.utmr2y),zone);
+        var c=getDipoleCoords(s,rxFields,false);if(!c)return;
+        var p1=utmToLatLon(c.x1,c.y1,zone);
+        var p2=utmToLatLon(c.x2,c.y2,zone);
         if(p1&&p2)lineData.push({pts:[[p1.lat,p1.lon],[p2.lat,p2.lon]],color:'#4da6ff',code:s.sensorCode||''});
       });
     }
     if(mapFilter==='all'||mapFilter==='tx'){
       txData.forEach(function(s){
-        if(!s.utmr1x||!s.utmr1y||!s.utmr2x||!s.utmr2y)return;
-        var p1=utmToLatLon(parseFloat(s.utmr1x),parseFloat(s.utmr1y),zone);
-        var p2=utmToLatLon(parseFloat(s.utmr2x),parseFloat(s.utmr2y),zone);
+        var c=getDipoleCoords(s,txFields,true);if(!c)return;
+        var p1=utmToLatLon(c.x1,c.y1,zone);
+        var p2=utmToLatLon(c.x2,c.y2,zone);
         if(p1&&p2)lineData.push({pts:[[p1.lat,p1.lon],[p2.lat,p2.lon]],color:'#ff9f0a',code:s.sourceCode||''});
       });
     }
@@ -660,40 +713,6 @@ function prefillFromMap(b64){
       },30);
     },30);
   }catch(e){console.error('prefill err',e);}
-}
-
-function handleProgressImport(evt){
-  var file=evt.target.files[0];if(!file)return;
-  var reader=new FileReader();
-  reader.onload=function(e){
-    try{
-      var wb=XLSX.read(e.target.result,{type:'binary',cellDates:true});
-      var count=0;
-      // Read Receivers sheet - mark codes with both From and To as complete
-      if(wb.SheetNames.indexOf('Receivers')!==-1){
-        var rows=XLSX.utils.sheet_to_json(wb.Sheets['Receivers'],{raw:false});
-        rows.forEach(function(r){
-          var code=r.sensorCode||r.sourceCode||'';
-          var hasTo=r.To&&String(r.To).trim();
-          if(code&&hasTo){importedProgress[code]=true;count++;}
-        });
-      }
-      // Read Transmitters sheet
-      if(wb.SheetNames.indexOf('Transmitters')!==-1){
-        var rows2=XLSX.utils.sheet_to_json(wb.Sheets['Transmitters'],{raw:false});
-        rows2.forEach(function(r){
-          var code=r.sourceCode||r.sensorCode||'';
-          var hasTo=r.To&&String(r.To).trim();
-          if(code&&hasTo){importedProgress[code]=true;count++;}
-        });
-      }
-      localStorage.setItem('importedProgress',JSON.stringify(importedProgress));
-      toast(count+' completed entries imported');
-      plotSensors();
-    }catch(err){toast('Error: '+err.message);}
-  };
-  reader.readAsBinaryString(file);
-  evt.target.value='';
 }
 
 // ═══════ IMPORT ═══════
