@@ -102,7 +102,7 @@ input[type="file"]::file-selector-button{background:var(--accent);color:#fff;bor
       <div><label>Station</label><select id="selStation" onchange="onStationChange()"><option value="">--</option></select></div>
       <div><label>Type</label><select id="selType" onchange="onTypeChange()"><option value="">--</option></select></div>
       <div class="full"><label>Detail</label><select id="selDetail" onchange="onDetailChange()"><option value="">--</option></select></div>
-      <div class="full"><label id="lblCode">Sensor Code</label><select id="selCode"><option value="">--</option></select></div>
+      <div class="full"><label id="lblCode">Sensor Code</label><select id="selCode" onchange="onCodeChange()"><option value="">--</option><option value="__manual__">✏ Enter manually...</option></select><input type="text" id="inManualCode" placeholder="Enter code manually" style="display:none;margin-top:6px" oninput="validateForm()"></div>
     </div>
   </div>
 
@@ -355,22 +355,36 @@ function onTypeChange(){
 }
 function onDetailChange(){refreshCodeDropdown();}
 
+function onCodeChange(){
+  var sel=document.getElementById('selCode'),inp=document.getElementById('inManualCode');
+  if(sel.value==='__manual__'){inp.style.display='block';inp.focus();}
+  else{inp.style.display='none';inp.value='';}
+  validateForm();
+}
+function getCodeValue(){
+  var sel=v('selCode');
+  if(sel==='__manual__')return document.getElementById('inManualCode').value.trim();
+  return sel;
+}
+
 function refreshCodeDropdown(){
   var area=v('selArea'),line=v('selLine'),station=v('selStation'),type=v('selType'),detail=v('selDetail');
   var data=currentData(),sel=document.getElementById('selCode'),curVal=sel.value;
+  var isManual=curVal==='__manual__';
   var typeField=logType==='rx'?'sensorType':'sourceType';
   var detailField=logType==='rx'?'sensorTypeDetail':'sourceTypeDetail';
   var codeField=logType==='rx'?'sensorCode':'sourceCode';
   var matching=data.filter(function(s){return s.area===area&&s.line===line&&String(s.station)===station&&s[typeField]===type&&s[detailField]===detail;});
   matching=matching.map(function(s){return{s:s,dist:getSensorDistance(s)};});
   matching.sort(function(a,b){return a.dist-b.dist;});
-  sel.innerHTML='<option value="">--</option>';
+  sel.innerHTML='<option value="">--</option><option value="__manual__">✏ Enter manually...</option>';
   matching.forEach(function(item){
     var code=item.s[codeField]||'';
     var dl=formatDist(item.dist);dl=dl?' ('+dl+')':'';
     sel.innerHTML+='<option value="'+esc(code)+'">'+esc(code)+dl+'</option>';
   });
-  if(curVal&&matching.some(function(i){return(i.s[codeField]||'')===curVal;}))sel.value=curVal;
+  if(isManual){sel.value='__manual__';}
+  else if(curVal&&matching.some(function(i){return(i.s[codeField]||'')===curVal;}))sel.value=curVal;
   else if(matching.length===1)sel.value=matching[0].s[codeField]||'';
 
   // Auto-fill coil from sensorSN if available
@@ -388,7 +402,14 @@ function calcDuration(){
   else{el.value='';el.className='';}
 }
 function validateForm(){
-  var ok=v('selArea')&&v('selLine')&&v('selStation')&&v('selType')&&v('selDetail')&&v('selCode')&&v('inGdas')&&v('selChannel')&&v('inInstDate')&&v('inInstTime');
+  var code=getCodeValue();
+  var isManual=v('selCode')==='__manual__';
+  var ok;
+  if(isManual){
+    ok=code&&v('inGdas')&&v('selChannel')&&v('inInstDate')&&v('inInstTime');
+  }else{
+    ok=v('selArea')&&v('selLine')&&v('selStation')&&v('selType')&&v('selDetail')&&code&&v('inGdas')&&v('selChannel')&&v('inInstDate')&&v('inInstTime');
+  }
   var type=v('selType');
   if(logType==='rx'&&type&&(type.indexOf('Hx')===0||type.indexOf('Hy')===0||type.indexOf('Hz')===0)&&!v('inCoil'))ok=false;
   document.getElementById('btnSubmit').disabled=!ok;
@@ -401,7 +422,7 @@ function submitLog(){
     logType:logType,
     area:v('selArea'),line:v('selLine'),station:v('selStation'),
     sensorType:v('selType'),sensorTypeDetail:v('selDetail'),
-    sensorCode:v('selCode'),
+    sensorCode:getCodeValue(),
     gDAS:v('inGdas'),channel:v('selChannel'),
     coilNumber:v('inCoil'),refCurrent:v('inRefCurrent'),
     installDate:v('inInstDate'),installTime:v('inInstTime'),
@@ -434,7 +455,9 @@ function loadLogForEdit(idx){
           document.getElementById('selDetail').value=log.sensorTypeDetail;onDetailChange();
           setTimeout(function(){
             var sel=document.getElementById('selCode');
-            for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===log.sensorCode){sel.selectedIndex=i;break;}}
+            var found=false;
+            for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===log.sensorCode){sel.selectedIndex=i;found=true;break;}}
+            if(!found){sel.value='__manual__';document.getElementById('inManualCode').style.display='block';document.getElementById('inManualCode').value=log.sensorCode;}
             document.getElementById('inGdas').value=log.gDAS;
             document.getElementById('selChannel').value=log.channel;
             document.getElementById('inCoil').value=log.coilNumber||'';
@@ -457,7 +480,7 @@ function loadLogForEdit(idx){
 function cancelEdit(){editingIndex=null;document.getElementById('editBtns').style.display='none';document.getElementById('btnSubmit').textContent='Submit Log';clearFormPartial();}
 function deleteLog(idx){if(!confirm('Delete?'))return;logs.splice(idx,1);saveLogs();updateLogCount();renderLogs();if(editingIndex===idx)cancelEdit();toast('Deleted');}
 function clearFormPartial(){
-  document.getElementById('selCode').value='';document.getElementById('inGdas').value='';
+  document.getElementById('selCode').value='';document.getElementById('inManualCode').value='';document.getElementById('inManualCode').style.display='none';document.getElementById('inGdas').value='';
   document.getElementById('selChannel').value='';document.getElementById('inCoil').value='';
   document.getElementById('inRefCurrent').value='';
   document.getElementById('inPickDate').value='';document.getElementById('inPickTime').value='';
@@ -759,6 +782,7 @@ function exportInstallations(){
         'Duration (Hrs)':l.duration?parseFloat(l.duration):''
       };
       if(l.coilNumber)row['Coil s/n']=l.coilNumber;
+      row['Comments']=l.comments||'';
       return row;
     });
     var ws=XLSX.utils.json_to_sheet(rxRows);
@@ -776,7 +800,8 @@ function exportInstallations(){
         'From':fmtDT(l.installDate,l.installTime),
         'To':fmtDT(l.pickupDate,l.pickupTime),
         'Duration (hrs)':l.duration?parseFloat(l.duration):'',
-        'Ref current':l.refCurrent?parseFloat(l.refCurrent):''
+        'Ref current':l.refCurrent?parseFloat(l.refCurrent):'',
+        'Comments':l.comments||''
       };
     });
     var ws2=XLSX.utils.json_to_sheet(txRows);
@@ -836,6 +861,7 @@ function handleAppendFile(evt){
         if(rxKeys[key]){rxSkipped++;return;}
         var row={'sensorCode':l.sensorCode,'gDAS s/n':parseInt(l.gDAS)||l.gDAS,'Channel':parseInt(l.channel)||l.channel,'From':fromStr,'To':fmtDT(l.pickupDate,l.pickupTime),'Duration (Hrs)':l.duration?parseFloat(l.duration):''};
         if(l.coilNumber)row['Coil s/n']=l.coilNumber;
+        row['Comments']=l.comments||'';
         existingRx.push(row);rxAdded++;
       });
 
@@ -843,7 +869,7 @@ function handleAppendFile(evt){
         var fromStr=fmtDT(l.installDate,l.installTime);
         var key=l.sensorCode+'|'+fromStr;
         if(txKeys[key]){txSkipped++;return;}
-        existingTx.push({'sourceCode':l.sensorCode,'gDAS s/n':parseInt(l.gDAS)||l.gDAS,'channel':parseInt(l.channel)||l.channel,'From':fromStr,'To':fmtDT(l.pickupDate,l.pickupTime),'Duration (hrs)':l.duration?parseFloat(l.duration):'','Ref current':l.refCurrent?parseFloat(l.refCurrent):''});
+        existingTx.push({'sourceCode':l.sensorCode,'gDAS s/n':parseInt(l.gDAS)||l.gDAS,'channel':parseInt(l.channel)||l.channel,'From':fromStr,'To':fmtDT(l.pickupDate,l.pickupTime),'Duration (hrs)':l.duration?parseFloat(l.duration):'','Ref current':l.refCurrent?parseFloat(l.refCurrent):'','Comments':l.comments||''});
         txAdded++;
       });
 
